@@ -1,0 +1,9 @@
+com/horario/features/SummaryKarateTest.class
+com/horario/features/EntriesKarateTest.class
+com/horario/config/TestDatabaseConfig.class
+com/horario/features/UsersKarateTest.class
+com/horario/BaseKarateTest.class
+com/horario/features/IntegrationKarateTest.class
+com/horario/KarateTestRunner.class
+com/horario/features/ClockOutKarateTest.class
+com/horario/features/ClockInKarateTest.class
