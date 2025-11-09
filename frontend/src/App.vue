@@ -1,6 +1,6 @@
 <template>
   <div class="container">
-    <h1>⏰ Mi Horario 1.0</h1>
+    <h1>⏰ Mi Horario 1.1∫</h1>
     <p class="subtitle">Gestiona tu tiempo de trabajo</p>
 
     <div v-if="error" class="error">{{ error }}</div>
@@ -34,6 +34,29 @@
         <strong>{{ currentStatus }}</strong>
       </div>
     </div>
+
+    <div class="sessions-section">
+      <h2>Sesiones de hoy</h2>
+      <div v-if="!todayEntries.length" class="session-empty">
+        Aún no hay sesiones registradas.
+      </div>
+      <div v-else class="sessions-list">
+        <div 
+          v-for="entry in todayEntries" 
+          :key="entry.id || entry.clock_in" 
+          class="session-item"
+        >
+          <div class="session-times">
+            <span>{{ formatTime(new Date(entry.clock_in)) }}</span>
+            <span> - </span>
+            <span>{{ entry.clock_out ? formatTime(new Date(entry.clock_out)) : 'En curso' }}</span>
+          </div>
+          <div class="session-duration">
+            {{ formatSessionDuration(entry) }}
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -43,29 +66,57 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 const WORK_DAY_HOURS = 8
 const API_BASE_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8080' : '')
 const currentEntry = ref(null)
-const workedHours = ref('0.00')
 const loading = ref(false)
 const error = ref('')
+const todayEntries = ref([])
+const currentDayKey = ref(formatDate(new Date()))
 const currentTime = ref(Date.now())
 let updateInterval = null
+let dayCheckInterval = null
+
+const totalWorkedHours = computed(() => {
+  if (!todayEntries.value.length) return 0
+  const totalMs = todayEntries.value.reduce((sum, entry) => {
+    const start = new Date(entry.clock_in).getTime()
+    const end = entry.clock_out
+      ? new Date(entry.clock_out).getTime()
+      : currentTime.value
+    return sum + Math.max(0, end - start)
+  }, 0)
+  return totalMs / (1000 * 60 * 60)
+})
+
+const completedHours = computed(() => {
+  if (!todayEntries.value.length) return 0
+  const totalMs = todayEntries.value.reduce((sum, entry) => {
+    if (!entry.clock_out) return sum
+    const start = new Date(entry.clock_in).getTime()
+    const end = new Date(entry.clock_out).getTime()
+    return sum + Math.max(0, end - start)
+  }, 0)
+  return totalMs / (1000 * 60 * 60)
+})
+
+const workedHours = computed(() => totalWorkedHours.value.toFixed(2))
 
 const statusText = computed(() => 
-  currentEntry.value ? 'Día en curso' : 'Día no iniciado'
+  currentEntry.value ? 'Sesión activa' : 'Sin sesión en curso'
 )
 
 const hoursCounter = computed(() => {
+  const completed = completedHours.value
   if (!currentEntry.value) {
-    return formatDuration(WORK_DAY_HOURS)
+    return formatDuration(Math.max(0, WORK_DAY_HOURS - completed))
   }
   const clockIn = currentEntry.value.clock_in
   const start = new Date(clockIn)
   const elapsed = (currentTime.value - start.getTime()) / (1000 * 60 * 60)
-  const remaining = Math.max(0, WORK_DAY_HOURS - elapsed)
+  const remaining = Math.max(0, WORK_DAY_HOURS - completed - elapsed)
   return formatDuration(remaining)
 })
 
 const buttonText = computed(() => 
-  currentEntry.value ? 'Finalizar Día' : 'Iniciar Día'
+  currentEntry.value ? 'Detener sesión' : 'Iniciar sesión'
 )
 
 const currentStatus = computed(() => 
@@ -95,11 +146,13 @@ async function checkStatus() {
     }
     
     const entries = await response.json()
+    todayEntries.value = entries
     currentEntry.value = entries.find(e => !e.clock_out) || null
     
     if (currentEntry.value) {
       startTimer()
-      await updateWorkedHours()
+    } else {
+      stopTimer()
     }
   } catch (err) {
     error.value = 'Error al verificar estado: ' + err.message
@@ -124,7 +177,7 @@ async function startDay() {
     })
 
     if (!response.ok) {
-      let errorMessage = 'Error al iniciar el día'
+      let errorMessage = 'Error al iniciar la sesión'
       try {
         const data = await response.json()
         errorMessage = data.error || errorMessage
@@ -135,9 +188,8 @@ async function startDay() {
       throw new Error(errorMessage)
     }
 
-    currentEntry.value = await response.json()
-    startTimer()
-    await updateWorkedHours()
+    await response.json()
+    await checkStatus()
   } catch (err) {
     error.value = 'Error: ' + err.message
     console.error('Error en startDay:', err)
@@ -155,7 +207,7 @@ async function endDay() {
     })
 
     if (!response.ok) {
-      let errorMessage = 'Error al finalizar el día'
+      let errorMessage = 'Error al finalizar la sesión'
       try {
         const data = await response.json()
         errorMessage = data.error || errorMessage
@@ -166,9 +218,8 @@ async function endDay() {
       throw new Error(errorMessage)
     }
 
-    currentEntry.value = null
-    stopTimer()
-    await updateWorkedHours()
+    await response.json()
+    await checkStatus()
   } catch (err) {
     error.value = 'Error: ' + err.message
     console.error('Error en endDay:', err)
@@ -177,42 +228,11 @@ async function endDay() {
   }
 }
 
-async function updateWorkedHours() {
-  try {
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-    const tomorrow = new Date(today)
-    tomorrow.setDate(tomorrow.getDate() + 1)
-
-    const response = await fetch(
-      `${API_BASE_URL}/api/summary?from=${today.toISOString()}&to=${tomorrow.toISOString()}`
-    )
-    
-    if (!response.ok) {
-      console.error('Error al obtener resumen:', response.status)
-      return
-    }
-    
-    const summary = await response.json()
-    const todaySummary = summary.find(s => s.date === formatDate(today))
-
-    if (todaySummary) {
-      workedHours.value = parseFloat(todaySummary.hours).toFixed(2)
-    } else {
-      workedHours.value = '0.00'
-    }
-  } catch (err) {
-    console.error('Error updating worked hours:', err)
-  }
-}
-
 function startTimer() {
   stopTimer()
   currentTime.value = Date.now()
-  updateWorkedHours()
   updateInterval = setInterval(() => {
     currentTime.value = Date.now()
-    updateWorkedHours()
   }, 1000)
 }
 
@@ -220,6 +240,27 @@ function stopTimer() {
   if (updateInterval) {
     clearInterval(updateInterval)
     updateInterval = null
+  }
+}
+
+function startDayWatcher() {
+  if (dayCheckInterval) return
+  dayCheckInterval = setInterval(() => {
+    const todayKey = formatDate(new Date())
+    if (todayKey !== currentDayKey.value) {
+      currentDayKey.value = todayKey
+      todayEntries.value = []
+      currentEntry.value = null
+      stopTimer()
+      checkStatus()
+    }
+  }, 60 * 1000)
+}
+
+function stopDayWatcher() {
+  if (dayCheckInterval) {
+    clearInterval(dayCheckInterval)
+    dayCheckInterval = null
   }
 }
 
@@ -242,12 +283,21 @@ function formatDate(date) {
   return date.toISOString().split('T')[0]
 }
 
+function formatSessionDuration(entry) {
+  const start = new Date(entry.clock_in).getTime()
+  const end = entry.clock_out ? new Date(entry.clock_out).getTime() : currentTime.value
+  const hours = Math.max(0, (end - start) / (1000 * 60 * 60))
+  return formatDuration(hours)
+}
+
 onMounted(() => {
+  startDayWatcher()
   checkStatus()
 })
 
 onUnmounted(() => {
   stopTimer()
+  stopDayWatcher()
 })
 </script>
 
@@ -367,5 +417,52 @@ h1 {
   border-radius: 8px;
   margin-bottom: 20px;
   font-size: 0.9rem;
+}
+
+.sessions-section {
+  margin-top: 30px;
+  text-align: left;
+}
+
+.sessions-section h2 {
+  margin-bottom: 12px;
+  font-size: 1rem;
+  color: #444;
+}
+
+.session-empty {
+  padding: 16px;
+  border: 2px dashed #e0e0e0;
+  border-radius: 10px;
+  color: #777;
+  font-size: 0.9rem;
+}
+
+.sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.session-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border: 1px solid #eee;
+  border-radius: 10px;
+  background: #f8f9ff;
+  font-size: 0.9rem;
+}
+
+.session-times span {
+  font-weight: 500;
+  color: #333;
+}
+
+.session-duration {
+  font-weight: 600;
+  color: #555;
+  font-variant-numeric: tabular-nums;
 }
 </style>
